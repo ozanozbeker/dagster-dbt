@@ -699,7 +699,10 @@ def default_metadata_from_dbt_resource_props(
     ]
     relation_name = ".".join(relation_parts) if relation_parts else None
 
-    materialization_type = dbt_resource_props.get("config", {}).get("materialized")
+    # dbt Fusion omits `config.materialized` for seeds, where dbt Core records "seed".
+    materialization_type = dbt_resource_props.get("config", {}).get("materialized") or (
+        "seed" if dbt_resource_props.get("resource_type") == "seed" else None
+    )
     return {
         **DbtMetadataSet(materialization_type=materialization_type),
         **TableMetadataSet(

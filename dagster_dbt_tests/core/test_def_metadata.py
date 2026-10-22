@@ -5,7 +5,10 @@ import pytest
 from dagster import AssetExecutionContext, AssetKey, MetadataValue
 from dagster._core.definitions.metadata.metadata_set import TableMetadataSet
 from dagster_dbt.asset_decorator import dbt_assets
-from dagster_dbt.asset_utils import DAGSTER_DBT_UNIQUE_ID_METADATA_KEY
+from dagster_dbt.asset_utils import (
+    DAGSTER_DBT_UNIQUE_ID_METADATA_KEY,
+    default_metadata_from_dbt_resource_props,
+)
 from dagster_dbt.core.resource import DbtCliResource
 from dagster_dbt.metadata_set import DbtMetadataSet
 
@@ -118,3 +121,20 @@ def test_storage_kind(test_jaffle_shop_manifest: dict[str, Any]) -> None:
     expected_adapter_type = test_jaffle_shop_manifest["metadata"]["adapter_type"]
     for spec in my_dbt_assets.specs:
         assert TableMetadataSet.extract(spec.metadata).storage_kind == expected_adapter_type
+
+
+def test_fusion_seed_materialization_type() -> None:
+    """A seed whose config omits `materialized`, as dbt Fusion writes it, still reports "seed"."""
+    metadata = default_metadata_from_dbt_resource_props(
+        {
+            "unique_id": "seed.jaffle.raw_orders",
+            "resource_type": "seed",
+            "database": "jaffle",
+            "schema": "main",
+            "alias": "raw_orders",
+            "config": {},
+            "columns": {},
+        }
+    )
+
+    assert DbtMetadataSet.extract(metadata).materialization_type == "seed"
