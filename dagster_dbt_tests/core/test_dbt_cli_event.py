@@ -1,6 +1,6 @@
 import pytest
 from dagster import AssetCheckEvaluation, AssetCheckSeverity, AssetMaterialization
-from dagster_dbt.core.dbt_cli_event import DbtCoreCliEventMessage
+from dagster_dbt.core.dbt_cli_event import DbtCoreCliEventMessage, DbtFusionCliEventMessage
 from dagster_dbt.dagster_dbt_translator import DagsterDbtTranslator
 
 MANIFEST = {
@@ -156,3 +156,55 @@ def test_warn_on_a_test_is_still_a_warn_severity_check() -> None:
     assert len(evaluations) == 1
     assert evaluations[0].passed is False
     assert evaluations[0].severity == AssetCheckSeverity.WARN
+
+
+def build_fusion_node_finished(unique_id: str, resource_type: str) -> DbtFusionCliEventMessage:
+    return DbtFusionCliEventMessage(
+        raw_event={
+            "data": {
+                "node_info": {
+                    "node_finished_at": "2026-10-22T18:46:31.967696Z",
+                    "node_started_at": "2026-10-22T18:46:31.964180Z",
+                    "node_status": "success",
+                    "resource_type": resource_type,
+                    "unique_id": unique_id,
+                },
+                "run_result": {"execution_time": 0.003, "status": "success"},
+            },
+            "info": {
+                "invocation_id": "01a164ef-aeb2-7782-8d47-ff5767b43a3e",
+                "level": "debug",
+                "msg": f"Finished running node {unique_id}",
+                "name": "NodeFinished",
+            },
+        },
+        event_history_metadata={},
+    )
+
+
+def test_fusion_model_node_finished_materializes() -> None:
+    """A dbt Fusion `NodeFinished` event for a model materializes its asset."""
+    event = build_fusion_node_finished("model.pytest_dwh.public__orders", "model")
+
+    events = list(event.to_default_asset_events(MANIFEST, DagsterDbtTranslator()))
+
+    assert [type(e) for e in events] == [AssetMaterialization]
+
+
+@pytest.mark.parametrize(
+    ("unique_id", "resource_type"),
+    [
+        ("unit_test.pytest_dwh.public__orders.ut_orders", "unit_test"),
+        ("function.pytest_dwh.double_it", "function"),
+    ],
+)
+def test_fusion_nodes_outside_manifest_nodes_are_not_results(
+    unique_id: str, resource_type: str
+) -> None:
+    """dbt Fusion finishes unit tests and functions as nodes, but the manifest keeps them outside
+    `nodes`, so treating them as results raised a `KeyError`.
+    """
+    event = build_fusion_node_finished(unique_id, resource_type)
+
+    assert not event.is_result_event
+    assert list(event.to_default_asset_events(MANIFEST, DagsterDbtTranslator())) == []

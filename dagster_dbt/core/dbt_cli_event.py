@@ -644,7 +644,18 @@ class DbtFusionCliEventMessage(DbtCliEventMessage):
 
     @property
     def is_result_event(self) -> bool:
-        return self.raw_event["info"]["name"] == "NodeFinished"
+        unique_id = self.raw_event["data"].get("node_info", {}).get("unique_id")
+        if unique_id is None:
+            return False
+
+        # Same node types as the dbt Core allowlist: unit tests and functions finish nodes too,
+        # but live outside `manifest["nodes"]`.
+        return self.raw_event["info"]["name"] == "NodeFinished" and unique_id.split(".")[0] in (
+            "model",
+            "seed",
+            "snapshot",
+            "test",
+        )
 
     def _get_check_passed(self) -> bool:
         node_status = self._get_node_status()
