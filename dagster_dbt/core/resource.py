@@ -47,9 +47,14 @@ def _get_dbt_executable() -> str:
     """
     scripts_dir = sysconfig.get_path("scripts")
     for name in ("dbtf", "dbt"):
-        if local_executable := shutil.which(name, path=scripts_dir):
+        local_executable = shutil.which(name, path=scripts_dir)
+        path_executable = shutil.which(name)
+        # Keep the bare name when PATH already finds this environment's executable.
+        if local_executable and not (
+            path_executable and os.path.samefile(local_executable, path_executable)
+        ):
             return local_executable
-        if shutil.which(name):
+        if path_executable:
             return name
     return "dbt"
 
