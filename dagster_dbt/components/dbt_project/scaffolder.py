@@ -29,7 +29,9 @@ class DbtProjectComponentScaffolder(Scaffolder[DbtScaffoldParams]):
                 "dbt-core is not installed. Please install dbt to scaffold this component."
             )
 
-        dbtRunner().invoke(["init"])
+        result = dbtRunner().invoke(["init"])
+        if not result.success:
+            raise DagsterInvalidInvocationError(f"`dbt init` failed: {result.exception}")
 
     def _git_url_params(self, git_url: str, project_path: str | None) -> dict[str, Any]:
         repo_relative_path = {"repo_relative_path": project_path} if project_path else {}
