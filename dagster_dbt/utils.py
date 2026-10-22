@@ -11,6 +11,7 @@ from packaging import version
 
 from dagster_dbt.compat import DBT_PYTHON_VERSION
 from dagster_dbt.errors import DagsterDbtCoreNotInstalledError
+from dagster_dbt.manifest_selection import DbtSelectionError, select_unique_ids_from_manifest_json
 
 if TYPE_CHECKING:
     from dagster_dbt.core.resource import DbtProject
@@ -62,16 +63,15 @@ def select_unique_ids(
     # dbt Fusion available, efficient(ish) to invoke the CLI for selection
     if manifest_version.major >= 2 and project is not None:
         return _select_unique_ids_from_cli(select, exclude, selector, project)
-    raise DagsterDbtCoreNotInstalledError(
-        f"Cannot evaluate the dbt selection (select={select!r}, exclude={exclude!r},"
-        f" selector={selector!r}): dagster-dbt does not install dbt-core, and there is no"
-        " `project` to evaluate the selection with the dbt CLI instead."
-        "\n\nInstall dbt-core with `pip install 'dagster-dbt[dbt-core]'` — any dbt adapter package,"
-        " such as `dbt-snowflake`, also pulls it in — or pass a `DbtProject`."
-        "\n\nIf the `dbt` package (dbt Fusion) is installed here, install dbt-core into a"
-        " different environment instead: the two share the `dbt` import namespace and"
-        " overwrite each other's files."
-    )
+    # No dbt-core and no project to run `dbt ls` in, so evaluate the selection in Python.
+    try:
+        return select_unique_ids_from_manifest_json(select, exclude, selector, manifest_json)
+    except DbtSelectionError as e:
+        raise DagsterDbtCoreNotInstalledError(
+            f"Cannot evaluate the dbt selection (select={select!r}, exclude={exclude!r},"
+            f" selector={selector!r}) from the manifest alone: {e}"
+            "\n\nPass a `DbtProject` to evaluate it with the dbt CLI instead."
+        ) from e
 
 
 def _is_select_all(select: str, exclude: str, selector: str) -> bool:
