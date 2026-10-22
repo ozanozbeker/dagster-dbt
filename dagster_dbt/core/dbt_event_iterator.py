@@ -1,7 +1,8 @@
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
+import orjson
 from dagster import (
     AssetCheckResult,
     AssetMaterialization,
@@ -203,6 +204,143 @@ def _fetch_row_count_metadata(
         return None
 
 
+# Keeps each dbt Fusion metadata command line under the 32,767 character limit on Windows.
+_FUSION_MAX_COMMAND_CHARS = 8_000
+
+
+def _batch_by_length(items: Sequence[str], max_chars: int) -> Iterator[list[str]]:
+    batch: list[str] = []
+    batch_chars = 0
+    for item in items:
+        if batch and batch_chars + len(item) > max_chars:
+            yield batch
+            batch, batch_chars = [], 0
+        batch.append(item)
+        batch_chars += len(item) + 1
+    if batch:
+        yield batch
+
+
+def _fetch_fusion_row_counts(
+    invocation: "DbtCliInvocation", unique_ids: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """Count the rows of each built relation with `dbt show`, one query per batch of relations.
+
+    Views are skipped for the same reason as `_fetch_row_count_metadata` skips them.
+    """
+    nodes = invocation.manifest["nodes"]
+    counted_unique_ids = [
+        unique_id
+        for unique_id in unique_ids
+        if nodes[unique_id].get("config", {}).get("materialized") != "view"
+        and nodes[unique_id].get("relation_name")
+    ]
+    adapter_type = invocation.manifest.get("metadata", {}).get("adapter_type")
+
+    # Each row carries its position in `selects`, so the result never depends on how the
+    # warehouse cases or quotes a unique id.
+    selects = [
+        f"select {index} as row_index, count(*) as row_count"
+        f" from {nodes[unique_id]['relation_name']}"
+        for index, unique_id in enumerate(counted_unique_ids)
+    ]
+    metadata_by_unique_id: dict[str, dict[str, Any]] = {}
+    for batch in _batch_by_length(selects, _FUSION_MAX_COMMAND_CHARS):
+        events, _ = invocation._run_metadata_command(  # noqa: SLF001
+            [
+                "show",
+                "--inline",
+                " union all ".join(batch),
+                "--limit",
+                str(len(batch)),
+                "--output",
+                "json",
+            ]
+        )
+        preview = next(
+            event["data"]["preview"] for event in events if event["info"]["name"] == "ShowNode"
+        )
+        for row in orjson.loads(preview):
+            row_index, row_count = row.values()
+            metadata_by_unique_id[counted_unique_ids[int(row_index)]] = {
+                **TableMetadataSet(row_count=int(row_count), storage_kind=adapter_type)
+            }
+
+    return metadata_by_unique_id
+
+
+def _fetch_fusion_column_metadata(
+    invocation: "DbtCliInvocation", unique_ids: Sequence[str], with_column_lineage: bool
+) -> dict[str, dict[str, Any]]:
+    """Read column schemas from the catalog that `dbt compile --write-catalog` writes for the
+    built nodes and their parents, then build column lineage as `_fetch_column_metadata` does.
+    """
+    manifest = invocation.manifest
+    selections = [
+        f"1+fqn:{'.'.join(manifest['nodes'][unique_id]['fqn'])}" for unique_id in unique_ids
+    ]
+    catalog_relations: dict[str, Mapping[str, Any]] = {}
+    for batch in _batch_by_length(selections, _FUSION_MAX_COMMAND_CHARS):
+        _, metadata_target_path = invocation._run_metadata_command(  # noqa: SLF001
+            ["compile", "--select", *batch, "--write-catalog"]
+        )
+        catalog = orjson.loads(metadata_target_path.joinpath("catalog.json").read_bytes())
+        catalog_relations.update(catalog.get("nodes", {}))
+        catalog_relations.update(catalog.get("sources", {}))
+
+    def _columns(unique_id: str) -> dict[str, dict[str, Any]] | None:
+        relation = catalog_relations.get(unique_id)
+        if relation is None:
+            return None
+        return {
+            column_name: {"data_type": column["type"]}
+            for column_name, column in relation["columns"].items()
+        }
+
+    metadata_by_unique_id: dict[str, dict[str, Any]] = {}
+    for unique_id in unique_ids:
+        column_schema_data = _columns(unique_id)
+        if column_schema_data is None:
+            continue
+        dbt_resource_props = manifest["nodes"][unique_id]
+        metadata = dict(default_metadata_from_dbt_resource_props({"columns": column_schema_data}))
+
+        if with_column_lineage:
+            parents = {}
+            for parent_unique_id in dbt_resource_props.get("depends_on", {}).get("nodes", []):
+                parent_props = manifest["nodes"].get(parent_unique_id) or manifest["sources"].get(
+                    parent_unique_id
+                )
+                parent_columns = _columns(parent_unique_id)
+                if parent_props and parent_props.get("relation_name") and parent_columns:
+                    parents[parent_props["relation_name"]] = parent_columns
+            try:
+                metadata.update(
+                    _build_column_lineage_metadata(
+                        event_history_metadata=EventHistoryMetadata(
+                            columns=column_schema_data, parents=parents
+                        ),
+                        dbt_resource_props=dbt_resource_props,
+                        manifest=manifest,
+                        dagster_dbt_translator=invocation.dagster_dbt_translator,
+                        target_path=invocation.target_path,
+                        project=invocation.project,
+                    )
+                )
+            except Exception as e:
+                logger.warning(
+                    "An error occurred while building column lineage metadata for the dbt resource"
+                    f" `{dbt_resource_props['original_file_path']}`."
+                    " Lineage metadata will not be included in the event.\n\n"
+                    f"Exception: {e}",
+                    exc_info=True,
+                )
+
+        metadata_by_unique_id[unique_id] = metadata
+
+    return metadata_by_unique_id
+
+
 class DbtEventIterator(Iterator[T]):
     """A wrapper around an iterator of dbt events which contains additional methods for
     post-processing the events, such as fetching row counts for materialized tables.
@@ -236,11 +374,7 @@ class DbtEventIterator(Iterator[T]):
                 yielded in the order they are emitted by dbt.
         """
         if self._dbt_cli_invocation.is_fusion:
-            logger.warning(
-                "Row counts are fetched through the dbt Core adapter, which the dbt Fusion engine"
-                " does not provide. Row count metadata will not be included in the emitted events."
-            )
-            return DbtEventIterator(events=self, dbt_cli_invocation=self._dbt_cli_invocation)
+            return self._attach_fusion_metadata(_fetch_fusion_row_counts, "row count")
 
         return self._attach_metadata(_fetch_row_count_metadata)
 
@@ -262,18 +396,70 @@ class DbtEventIterator(Iterator[T]):
                 yielded in the order they are emitted by dbt.
         """
         if self._dbt_cli_invocation.is_fusion:
-            logger.warning(
-                "Column metadata is fetched through the dbt Core adapter, which the dbt Fusion"
-                " engine does not provide. To emit column schema and column lineage under Fusion,"
-                " add the `dagster` dbt package's `log_column_level_metadata` macro as a post-hook"
-                " in your dbt project; `stream()` attaches the metadata it logs without this call."
+            return self._attach_fusion_metadata(
+                lambda invocation, unique_ids: _fetch_fusion_column_metadata(
+                    invocation, unique_ids, with_column_lineage
+                ),
+                "column",
             )
-            return DbtEventIterator(events=self, dbt_cli_invocation=self._dbt_cli_invocation)
 
         fetch_metadata = lambda invocation, event: _fetch_column_metadata(
             invocation, event, with_column_lineage
         )
         return self._attach_metadata(fetch_metadata)
+
+    def _attach_fusion_metadata(
+        self,
+        fetch: Callable[["DbtCliInvocation", Sequence[str]], dict[str, dict[str, Any]]],
+        description: str,
+    ) -> "DbtEventIterator[DbtDagsterEventType]":
+        """Attach metadata fetched for all materializations at once, after dbt Fusion exits.
+
+        dbt Fusion has no Python adapter to query per event, and each metadata command starts a
+        dbt process, so one batch per run costs less than one process per event.
+        """
+
+        def _attach() -> Iterator[DbtDagsterEventType]:
+            events: list[DbtDagsterEventType] = []
+            caught_exception: Exception | None = None
+            try:
+                events.extend(self)
+            except Exception as e:
+                caught_exception = e
+
+            unique_ids = list(
+                dict.fromkeys(
+                    cast("TextMetadataValue", event.metadata["unique_id"]).text
+                    for event in events
+                    if isinstance(event, (AssetMaterialization, Output))
+                    and "unique_id" in event.metadata
+                )
+            )
+            metadata_by_unique_id: dict[str, dict[str, Any]] = {}
+            if unique_ids:
+                try:
+                    metadata_by_unique_id = fetch(self._dbt_cli_invocation, unique_ids)
+                except Exception as e:
+                    logger.warning(
+                        f"An error occurred while fetching {description} metadata with dbt Fusion."
+                        f" {description.capitalize()} metadata will not be included in the"
+                        f" events.\n\nException: {e}",
+                        exc_info=True,
+                    )
+
+            for event in events:
+                unique_id_value = event.metadata.get("unique_id")
+                metadata = (
+                    metadata_by_unique_id.get(cast("TextMetadataValue", unique_id_value).text)
+                    if isinstance(event, (AssetMaterialization, Output)) and unique_id_value
+                    else None
+                )
+                yield event.with_metadata({**event.metadata, **metadata}) if metadata else event
+
+            if caught_exception:
+                raise caught_exception
+
+        return DbtEventIterator(_attach(), dbt_cli_invocation=self._dbt_cli_invocation)
 
     def _attach_metadata(
         self,

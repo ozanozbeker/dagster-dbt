@@ -50,6 +50,22 @@ def _get_dbt_target_path() -> Path:
     return Path(os.getenv("DBT_TARGET_PATH", "target"))
 
 
+_PROFILE_AND_VARS_FLAGS: Final[frozenset[str]] = frozenset(
+    {"--profile", "--target", "-t", "--vars"}
+)
+
+
+def _get_profile_and_vars_args(args: Sequence[str]) -> list[str]:
+    """Return the flags of a dbt command line that choose the connection and the project vars."""
+    kept: list[str] = []
+    for index, arg in enumerate(args):
+        if arg in _PROFILE_AND_VARS_FLAGS and index + 1 < len(args):
+            kept += [arg, args[index + 1]]
+        elif arg.split("=", 1)[0] in _PROFILE_AND_VARS_FLAGS and "=" in arg:
+            kept.append(arg)
+    return kept
+
+
 class RelationKey(NamedTuple):
     """Hashable representation of the information needed to identify a relation in a database."""
 
@@ -99,6 +115,7 @@ class DbtCliInvocation:
         init=False, default=DAGSTER_DBT_TERMINATION_TIMEOUT_SECONDS
     )
     adapter: BaseAdapter | None = field(default=None)
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
     postprocessing_threadpool_num_threads: int = field(
         init=False, default=DEFAULT_EVENT_POSTPROCESSING_THREADPOOL_SIZE
     )
@@ -114,6 +131,46 @@ class DbtCliInvocation:
     def is_fusion(self) -> bool:
         """Whether the invoked dbt executable is the Fusion engine, which has no dbt Core adapter."""
         return self.cli_version.major >= 2
+
+    def _run_metadata_command(self, args: Sequence[str]) -> tuple[list[dict[str, Any]], Path]:
+        """Run a dbt command that fetches metadata, returning its log events and target path.
+
+        The command writes to its own target path, so it never overwrites this invocation's
+        artifacts, and reuses this invocation's executable, environment, profile, target and vars.
+        """
+        invoked_args = [str(arg) for arg in cast("Sequence[Any]", self.process.args)]
+        metadata_target_path = self.target_path.joinpath("dagster_metadata")
+        completed = subprocess.run(
+            [invoked_args[0], *args, *_get_profile_and_vars_args(invoked_args[1:])],
+            capture_output=True,
+            env={
+                **os.environ,
+                **self.env,
+                "DBT_LOG_FORMAT": "json",
+                "DBT_TARGET_PATH": os.fspath(metadata_target_path),
+                "DBT_LOG_PATH": os.fspath(metadata_target_path),
+            },
+            cwd=self.project_dir,
+            check=False,
+        )
+
+        events: list[dict[str, Any]] = []
+        for line in completed.stdout.splitlines():
+            with contextlib.suppress(orjson.JSONDecodeError):
+                event = orjson.loads(line)
+                if isinstance(event, dict):
+                    events.append(event)
+
+        if completed.returncode != 0:
+            error_messages = [
+                event["info"]["msg"] for event in events if event["info"].get("level") == "error"
+            ]
+            raise DagsterDbtCliRuntimeError(
+                description=f"`dbt {args[0]}` failed with exit code {completed.returncode}: "
+                + ("\n".join(error_messages) or completed.stderr.decode(errors="replace"))
+            )
+
+        return events, metadata_target_path
 
     def _get_columns_from_dbt_resource_props(
         self, adapter: BaseAdapter, dbt_resource_props: dict[str, Any]
@@ -196,6 +253,7 @@ class DbtCliInvocation:
             raise_on_error=raise_on_error,
             context=context,
             adapter=adapter,
+            env=env,
             cli_version=cli_version,
         )
         logger.info(f"Running dbt command: `{dbt_cli_invocation.dbt_command}`.")
