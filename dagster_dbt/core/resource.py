@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import sysconfig
 import uuid
 from argparse import ArgumentParser, Namespace
 from collections.abc import Sequence
@@ -38,10 +39,19 @@ logger = get_dagster_logger()
 
 @cache
 def _get_dbt_executable() -> str:
-    if shutil.which("dbtf"):
-        return "dbtf"
-    else:
-        return "dbt"
+    """Find `dbtf`, then `dbt`, looking in this interpreter's scripts directory before PATH.
+
+    Running the environment's Python without activating it leaves its scripts directory off
+    PATH, so a `dbt` elsewhere on PATH, such as Homebrew's, would otherwise run instead of the one
+    installed next to dagster-dbt.
+    """
+    scripts_dir = sysconfig.get_path("scripts")
+    for name in ("dbtf", "dbt"):
+        if local_executable := shutil.which(name, path=scripts_dir):
+            return local_executable
+        if shutil.which(name):
+            return name
+    return "dbt"
 
 
 DBT_EXECUTABLE = _get_dbt_executable()
@@ -87,7 +97,7 @@ class DbtCliResource(ConfigurableResource):
             https://docs.getdbt.com/docs/core/connect-data-platform/connection-profiles for more
             information.
         dbt_executable (str): The path to the dbt executable. Defaults to `dbtf` if available,
-            otherwise `dbt`.
+            otherwise `dbt`, preferring the one installed in this Python environment.
         state_path (Optional[str]): The path, relative to the project directory, to a directory of
             dbt artifacts to be used with `--state` / `--defer-state`.
 
@@ -188,7 +198,10 @@ class DbtCliResource(ConfigurableResource):
     )
     dbt_executable: str = Field(
         default=DBT_EXECUTABLE,
-        description="The path to the dbt executable. Defaults to `dbtf` if available, otherwise `dbt`.",
+        description=(
+            "The path to the dbt executable. Defaults to `dbtf` if available, otherwise `dbt`,"
+            " preferring the one installed in this Python environment."
+        ),
     )
     state_path: str | None = Field(
         default=None,

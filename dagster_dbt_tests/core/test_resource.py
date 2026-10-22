@@ -682,3 +682,23 @@ def test_metadata(test_jaffle_shop_manifest: dict[str, Any], dbt: DbtCliResource
         assert_on_expected_metadata(
             materialization.step_materialization_data.materialization.metadata
         )
+
+
+def test_default_dbt_executable_prefers_this_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default executable is this environment's `dbt` even when another `dbt` is on PATH."""
+    import sysconfig
+
+    from dagster_dbt.core.resource import _get_dbt_executable
+
+    scripts_dir, other_dir = tmp_path / "scripts", tmp_path / "other"
+    for directory in (scripts_dir, other_dir):
+        directory.mkdir()
+        executable = directory / "dbt"
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+    monkeypatch.setattr(sysconfig, "get_path", lambda name: str(scripts_dir))
+    monkeypatch.setenv("PATH", str(other_dir))
+
+    assert _get_dbt_executable.__wrapped__() == str(scripts_dir / "dbt")
