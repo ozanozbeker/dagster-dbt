@@ -121,3 +121,35 @@ def test_fusion_test_result_to_check_evaluation(
     assert isinstance(evaluation, AssetCheckEvaluation)
     assert evaluation.passed is passed
     assert evaluation.severity is severity
+
+
+@pytest.mark.parametrize(
+    ("versions", "warns"),
+    [
+        ({"dbt": "2.0.9", "dbt-core": "1.12.6"}, True),
+        ({"dbt-oss": "2.0.9", "dbt-core": "1.12.6"}, True),
+        ({"dbt": "2.0.9"}, False),
+        ({"dbt-core": "1.12.6"}, False),
+        ({"dbt-core": "2.0.0rc9"}, False),
+    ],
+)
+def test_warns_when_dbt_2_and_dbt_core_share_an_environment(
+    monkeypatch: pytest.MonkeyPatch, versions: dict[str, str], warns: bool
+) -> None:
+    """dbt 2.x and dbt-core 1.x overwrite each other's files, so installing both warns."""
+    import importlib.metadata
+    import warnings
+
+    from dagster_dbt.compat import _warn_if_dbt_2_and_dbt_core_installed
+
+    def _version(name: str) -> str:
+        if name not in versions:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return versions[name]
+
+    monkeypatch.setattr(importlib.metadata, "version", _version)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _warn_if_dbt_2_and_dbt_core_installed()
+
+    assert bool(caught) == warns

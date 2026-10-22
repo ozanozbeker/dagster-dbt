@@ -1,4 +1,7 @@
+import contextlib
+import importlib.metadata
 import logging
+import warnings
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -9,6 +12,33 @@ from packaging import version
 # happen. at the end of this file, we set the root logger's handlers to the original set to ensure that
 # after this file is loaded, the root logger's handlers will be unchanged.
 existing_root_logger_handlers = [*logging.getLogger().handlers]
+
+
+def _warn_if_dbt_2_and_dbt_core_installed() -> None:
+    """Warn when dbt 2.x and dbt-core 1.x share this environment.
+
+    Both write the `dbt` import package and the `dbt` script, so whichever installed last owns
+    each file, and uninstalling either one deletes files the other needs.
+    """
+    installed: dict[str, version.Version] = {}
+    for name in ("dbt", "dbt-oss", "dbt-core"):
+        with contextlib.suppress(importlib.metadata.PackageNotFoundError):
+            installed[name] = version.parse(importlib.metadata.version(name))
+
+    dbt_2_names = [name for name, v in installed.items() if v.major >= 2]
+    dbt_core_1 = installed.get("dbt-core")
+    if dbt_2_names and dbt_core_1 is not None and dbt_core_1.major < 2:
+        warnings.warn(
+            f"Both {' and '.join(f'`{name}` {installed[name]}' for name in dbt_2_names)} and"
+            f" `dbt-core` {dbt_core_1} are installed. They overwrite each other's files in the"
+            " `dbt` package, so this environment runs a mix of both. dbt 2.x needs no adapter"
+            " package: install it in an environment without dbt-core or any `dbt-<adapter>`"
+            " package.",
+            stacklevel=2,
+        )
+
+
+_warn_if_dbt_2_and_dbt_core_installed()
 
 
 try:
