@@ -1156,13 +1156,16 @@ def get_subset_selection_for_context(
             the environment variable is not set and will either use dbt's default (eager) or the
             user's setting.
     """
+    # dbt 2.0 rejects `--select` beside `--selector`, and `@dbt_assets` only allows a selector with
+    # the default `select`, which the selector overrides anyway.
     default_dbt_selection = []
-    if select:
-        default_dbt_selection += ["--select", select]
-    if exclude:
-        default_dbt_selection += ["--exclude", exclude]
     if selector:
         default_dbt_selection += ["--selector", selector]
+    else:
+        if select:
+            default_dbt_selection += ["--select", select]
+        if exclude:
+            default_dbt_selection += ["--exclude", exclude]
 
     assets_def = context.assets_def
     is_asset_subset = assets_def.keys_by_output_name != assets_def.node_keys_by_output_name

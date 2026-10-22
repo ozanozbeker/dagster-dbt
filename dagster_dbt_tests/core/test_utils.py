@@ -98,3 +98,39 @@ def test_select_all_on_fusion_keeps_isolated_nodes() -> None:
     assert isolated in selected
     assert selected == manifest["nodes"].keys()
     from_cli.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("select", "exclude", "selector", "expected"),
+    [
+        ("fqn:*", "", "marts", ["--selector", "marts"]),
+        ("tag:daily", "tag:slow", "", ["--select", "tag:daily", "--exclude", "tag:slow"]),
+    ],
+)
+def test_default_selection_never_combines_select_with_selector(
+    select: str, exclude: str, selector: str, expected: list[str]
+) -> None:
+    """dbt 2.0 exits with code 2 on `--select` beside `--selector`, so a full run sends one."""
+    from types import SimpleNamespace
+
+    from dagster_dbt.asset_utils import get_subset_selection_for_context
+    from dagster_dbt.dagster_dbt_translator import DagsterDbtTranslator
+
+    unsubsetted = SimpleNamespace(
+        keys_by_output_name={},
+        node_keys_by_output_name={},
+        check_specs_by_output_name={},
+        node_check_specs_by_output_name={},
+    )
+
+    selection_args, _ = get_subset_selection_for_context(
+        context=SimpleNamespace(assets_def=unsubsetted),  # ty: ignore[invalid-argument-type]
+        manifest={},
+        select=select,
+        exclude=exclude,
+        selector=selector,
+        dagster_dbt_translator=DagsterDbtTranslator(),
+        current_dbt_indirect_selection_env=None,
+    )
+
+    assert selection_args == expected
