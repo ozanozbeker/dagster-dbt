@@ -10,13 +10,16 @@ CLOUD_MANIFEST_PATH = Path(__file__).parents[1] / "cloud_v2" / "manifest.json"
 
 
 def test_select_unique_ids_without_dbt_core() -> None:
-    """Selection with no dbt-core and no project.
-
-    The default selection is every node in the manifest, which needs no selection engine —
-    this is what keeps the dbt Cloud integration working without dbt-core. Anything else
-    must fail with an error that says how to install dbt-core.
+    """Without dbt-core and without a project, selection is evaluated against the manifest, and a
+    selection the manifest cannot answer raises with a pointer to `DbtProject`.
     """
     manifest = json.loads(CLOUD_MANIFEST_PATH.read_text())
+
+    def _select(select: str, exclude: str = "", selector: str = "") -> set[str]:
+        selected = select_unique_ids(
+            select=select, exclude=exclude, selector=selector, project=None, manifest_json=manifest
+        )
+        return {unique_id for unique_id in selected if not unique_id.startswith("test.")}
 
     with mock.patch("dagster_dbt.utils.DBT_PYTHON_VERSION", None):
         for select in ("fqn:*", ""):
@@ -27,15 +30,23 @@ def test_select_unique_ids_without_dbt_core() -> None:
                 == manifest["nodes"].keys()
             )
 
-        for select, exclude, selector in (
-            ("tag:foo", "", ""),
-            ("fqn:*", "tag:foo", ""),
-            ("fqn:*", "", "my_selector"),
-        ):
-            with pytest.raises(DagsterDbtCoreNotInstalledError, match=r"dagster-dbt\[dbt-core\]"):
+        assert _select("stg_customers+") == {
+            "model.jaffle_shop.stg_customers",
+            "model.jaffle_shop.customers",
+        }
+        assert _select("fqn:*", exclude="resource_type:seed resource_type:test") == {
+            unique_id for unique_id in manifest["nodes"] if unique_id.startswith("model.")
+        }
+        assert _select("", selector="raw_customer_child_models") == {
+            "model.jaffle_shop.stg_customers",
+            "model.jaffle_shop.customers",
+        }
+
+        for select, selector in (("state:modified", ""), ("", "missing_selector")):
+            with pytest.raises(DagsterDbtCoreNotInstalledError, match="Pass a `DbtProject`"):
                 select_unique_ids(
                     select=select,
-                    exclude=exclude,
+                    exclude="",
                     selector=selector,
                     project=None,
                     manifest_json=manifest,

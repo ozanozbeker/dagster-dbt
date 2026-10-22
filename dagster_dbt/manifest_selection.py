@@ -418,8 +418,9 @@ class _ManifestSelector:
 
         self._selectors: Mapping[str, Any] = manifest.get("selectors") or {}
         # Where dbt 2.0 and dbt-core disagree, follow the engine that wrote the manifest.
-        dbt_version = str((manifest.get("metadata") or {}).get("dbt_version", ""))
-        self._is_dbt_2 = dbt_version.split(".")[0].isdigit() and int(dbt_version.split(".")[0]) >= 2
+        # dbt Cloud release tracks report year versions, such as 2025.3.4, and run dbt-core.
+        major = str((manifest.get("metadata") or {}).get("dbt_version", "")).split(".")[0]
+        self._is_dbt_2 = major.isdigit() and 2 <= int(major) < 2000
 
     def select(self, spec: _Spec) -> set[str]:
         direct, _ = self._select_recursively(spec)
