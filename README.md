@@ -5,7 +5,7 @@ This is a short-lived fork of `dagster-dbt` 0.29.26 (dagster 1.13.26) that makes
 Install it from the tag, alongside dbt 2.0 and no dbt-core:
 
 ```bash
-uv add "dagster-dbt @ git+https://github.com/ozanozbeker/dagster-dbt@v0.29.26-fusion.2" dbt
+uv add "dagster-dbt @ git+https://github.com/ozanozbeker/dagster-dbt@v0.29.26-fusion.3" dbt
 ```
 
 The fork fixes these failures on top of upstream:
@@ -14,6 +14,7 @@ The fork fixes these failures on top of upstream:
 - `python-dateutil` is a declared dependency. Upstream only gets it through dbt-common, so `import dagster_dbt` fails without dbt-core.
 - Seeds keep `dagster-dbt/materialization_type`. dbt 2.0 leaves `config.materialized` empty for seeds.
 - The dbt project component scaffolder raises when `dbt init` fails, instead of carrying on.
+- `@dbt_assets(selector=...)` sends `--selector` alone. Upstream adds the default `--select fqn:*`, and dbt 2.0 exits with code 2 on the pair.
 - `pyproject.toml` drops the monorepo's `[tool.uv.sources]`, which broke installs from git.
 
 It also fills these gaps that upstream leaves under dbt 2.0:
